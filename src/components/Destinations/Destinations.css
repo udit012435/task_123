@@ -2,10 +2,20 @@
   margin-bottom: 24px;
 }
 
-.stack-lock {
+/* Tall spacer that reserves the scroll distance for the pinned stack. */
+.stack-scene {
   position: relative;
+}
+
+/* Pinned wrap. Its `position` is toggled in JS between relative (before),
+   fixed (during) and absolute (after) — the ScrollMagic pin technique. */
+.stack-pin {
+  position: relative;
+  top: 0;
+  left: 0;
   height: 100vh;
   min-height: 480px;
+  width: 100%;
   overflow: hidden;
 }
 
@@ -113,8 +123,7 @@
 }
 
 @media (max-width: 640px) {
-  .stack-lock {
-    height: 100vh;
+  .stack-pin {
     min-height: 420px;
   }
 
