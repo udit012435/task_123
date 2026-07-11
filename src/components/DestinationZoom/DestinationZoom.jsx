@@ -3,7 +3,6 @@ import './DestinationZoom.css'
 
 const FRAME_COUNT = 51
 const FRAME_PATH = (index) => `/assets/ezgif-frame-${String(index).padStart(3, '0')}.jpg`
-const TOUCH_SENSITIVITY = 2.2
 
 const STAGES = [
   {
@@ -53,17 +52,20 @@ function clamp01(value) {
 
 function DestinationZoom() {
   const sectionRef = useRef(null)
+  const pinRef = useRef(null)
   const canvasRef = useRef(null)
   const imagesRef = useRef([])
   const frameIndexRef = useRef(0)
   const stageRefs = useRef([])
   const progressFillRef = useRef(null)
-  const progressRef = useRef(0)
-  const lockedRef = useRef(false)
-  const canRelockRef = useRef(true)
+  const pinPhaseRef = useRef('')
 
   const [loadedCount, setLoadedCount] = useState(0)
   const [ready, setReady] = useState(false)
+  // Reflects the sequence position as scroll state: 'intro' -> 'playing' -> 'done'.
+  // 'done' means every frame has played, so the page is free to scroll on.
+  const [phase, setPhase] = useState('intro')
+  const phaseRef = useRef('intro')
 
   const drawFrame = (index) => {
     const canvas = canvasRef.current
@@ -102,12 +104,12 @@ function DestinationZoom() {
     ctx.drawImage(image, offsetX, offsetY, drawWidth, drawHeight)
   }
 
-  const applyProgress = (progress) => {
+  const applyProgress = (progress, force = false) => {
     const frameIndex = Math.min(
       FRAME_COUNT,
       Math.max(1, Math.round(1 + progress * (FRAME_COUNT - 1)))
     )
-    if (frameIndex !== frameIndexRef.current) {
+    if (force || frameIndex !== frameIndexRef.current) {
       frameIndexRef.current = frameIndex
       drawFrame(frameIndex)
     }
@@ -124,8 +126,17 @@ function DestinationZoom() {
     if (progressFillRef.current) {
       progressFillRef.current.style.width = `${progress * 100}%`
     }
+
+    // Track the scroll-driven phase in state. Only flip on a real transition
+    // so we are not calling setState on every animation frame.
+    const nextPhase = progress >= 0.999 ? 'done' : progress <= 0.001 ? 'intro' : 'playing'
+    if (nextPhase !== phaseRef.current) {
+      phaseRef.current = nextPhase
+      setPhase(nextPhase)
+    }
   }
 
+  // Preload the whole frame sequence up front.
   useEffect(() => {
     let loaded = 0
     const images = []
@@ -143,156 +154,155 @@ function DestinationZoom() {
     }
 
     imagesRef.current = images
-    applyProgress(0)
-
-    const handleResize = () => drawFrame(frameIndexRef.current || 1)
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Scroll-jacking: once the section reaches the viewport, trap the scroll
-  // (purely via preventDefault) and drive the frame sequence from wheel/touch
-  // input until it finishes, then let the very scroll that crosses the end
-  // pass straight through to native scrolling so the user continues on.
+  // Exactly the ScrollMagic pin technique: a tall section acts as the spacer
+  // that reserves the scroll distance, and the inner wrap is pinned by
+  // toggling its position across three phases as you scroll through it:
+  //
+  //   before  -> position: relative  (sits at the top of the section)
+  //   during  -> position: fixed     (pinned to the viewport, frames play)
+  //   after   -> position: absolute  (parked at the bottom of the section)
+  //
+  // The frame index and every text tween are derived purely from how far you
+  // have scrolled into the section, so:
+  //   - scroll down drives 0 -> 1 (frames forward) and, at the bottom, the wrap
+  //     unpins and the page continues to the next section;
+  //   - scroll up drives 1 -> 0 (frames reverse) and, at the top (frame 1), it
+  //     unpins so you continue up to the previous section.
+  //
+  // Using fixed (not sticky) makes the pin immune to the ancestor's
+  // `overflow-x: hidden`, which would otherwise break sticky pinning.
   useEffect(() => {
     const section = sectionRef.current
-    if (!section) return
+    const pin = pinRef.current
+    if (!section || !pin) return
 
-    const scrollDistance = () => Math.max(window.innerHeight * 2.4, 1400)
+    let rafId = 0
+    let running = false
 
-    // Normalise wheel delta so line/page-mode wheels advance at the same rate
-    // as pixel-mode ones (otherwise line-mode mice barely move the sequence).
-    const normalize = (event) => {
-      if (event.deltaMode === 1) return event.deltaY * 16
-      if (event.deltaMode === 2) return event.deltaY * window.innerHeight
-      return event.deltaY
+    const setPinPhase = (phase) => {
+      if (phase === pinPhaseRef.current) return
+      pinPhaseRef.current = phase
+      if (phase === 'during') {
+        pin.style.position = 'fixed'
+        pin.style.top = '0px'
+        pin.style.bottom = 'auto'
+      } else if (phase === 'after') {
+        pin.style.position = 'absolute'
+        pin.style.top = 'auto'
+        pin.style.bottom = '0px'
+      } else {
+        pin.style.position = 'relative'
+        pin.style.top = '0px'
+        pin.style.bottom = 'auto'
+      }
     }
 
-    // The section covers the middle line of the viewport -> ready to engage.
-    const nearSection = () => {
-      const rect = section.getBoundingClientRect()
-      const mid = window.innerHeight * 0.5
-      return rect.top <= mid && rect.bottom >= mid
-    }
+    const renderOnce = () => {
+      const duration = section.offsetHeight - window.innerHeight
+      const scrolled = -section.getBoundingClientRect().top
 
-    const lock = () => {
-      // Snap the section flush to the top once, then hold it there by
-      // preventing every wheel/touch scroll while locked.
-      window.scrollTo(0, section.getBoundingClientRect().top + window.scrollY)
-      lockedRef.current = true
-    }
-
-    const unlock = () => {
-      lockedRef.current = false
-      canRelockRef.current = false
-    }
-
-    const step = (deltaY) => {
-      const next = clamp01(progressRef.current + deltaY / scrollDistance())
-      progressRef.current = next
-      applyProgress(next)
-    }
-
-    // Returns true if the scroll was consumed (caller must preventDefault).
-    const drive = (deltaY) => {
-      if (lockedRef.current) {
-        // At an end and still pushing outward -> release; let this scroll
-        // fall through to the browser so the user leaves the section.
-        if ((progressRef.current >= 1 && deltaY > 0) || (progressRef.current <= 0 && deltaY < 0)) {
-          unlock()
-          return false
-        }
-        step(deltaY)
-        return true
+      let progress
+      if (scrolled <= 0 || duration <= 0) {
+        setPinPhase('before')
+        progress = 0
+      } else if (scrolled >= duration) {
+        setPinPhase('after')
+        progress = 1
+      } else {
+        setPinPhase('during')
+        progress = scrolled / duration
       }
 
-      // Re-arm only after the section has fully left the engage band, so a
-      // stray flick right after release can't immediately re-trap the user.
-      if (!canRelockRef.current) {
-        if (!nearSection()) canRelockRef.current = true
-        return false
-      }
-
-      const wantsDown = deltaY > 0 && progressRef.current < 1
-      const wantsUp = deltaY < 0 && progressRef.current > 0
-      if ((wantsDown || wantsUp) && nearSection()) {
-        lock()
-        step(deltaY)
-        return true
-      }
-      return false
+      applyProgress(clamp01(progress))
     }
 
-    const handleWheel = (event) => {
-      if (drive(normalize(event))) event.preventDefault()
+    const loop = () => {
+      renderOnce()
+      if (running) rafId = requestAnimationFrame(loop)
     }
 
-    let touchStartY = null
-
-    const handleTouchStart = (event) => {
-      touchStartY = event.touches[0].clientY
+    const start = () => {
+      if (running) return
+      running = true
+      rafId = requestAnimationFrame(loop)
     }
 
-    const handleTouchMove = (event) => {
-      if (touchStartY === null) return
-      const currentY = event.touches[0].clientY
-      const deltaY = (touchStartY - currentY) * TOUCH_SENSITIVITY
-      touchStartY = currentY
-      if (drive(deltaY)) event.preventDefault()
+    const stop = () => {
+      running = false
+      if (rafId) cancelAnimationFrame(rafId)
+      rafId = 0
+      renderOnce() // settle on the correct clamped end (frame 1 or frame 51)
     }
 
-    const handleTouchEnd = () => {
-      touchStartY = null
-    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) start()
+        else stop()
+      },
+      { threshold: 0 },
+    )
+    observer.observe(section)
 
-    window.addEventListener('wheel', handleWheel, { passive: false })
-    window.addEventListener('touchstart', handleTouchStart, { passive: true })
-    window.addEventListener('touchmove', handleTouchMove, { passive: false })
-    window.addEventListener('touchend', handleTouchEnd, { passive: true })
+    const onResize = () => {
+      drawFrame(frameIndexRef.current || 1)
+      renderOnce()
+    }
+    window.addEventListener('resize', onResize)
+
+    renderOnce()
 
     return () => {
-      window.removeEventListener('wheel', handleWheel)
-      window.removeEventListener('touchstart', handleTouchStart)
-      window.removeEventListener('touchmove', handleTouchMove)
-      window.removeEventListener('touchend', handleTouchEnd)
+      running = false
+      if (rafId) cancelAnimationFrame(rafId)
+      observer.disconnect()
+      window.removeEventListener('resize', onResize)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const loadPercent = Math.round((loadedCount / FRAME_COUNT) * 100)
 
   return (
-    <section ref={sectionRef} className="zoom-section" aria-label="Scroll to zoom into a destination">
-      <canvas ref={canvasRef} className="zoom-canvas" />
-      <div className="zoom-vignette" />
+    <section
+      ref={sectionRef}
+      className={`zoom-section zoom-${phase}`}
+      aria-label="Scroll to zoom into a destination"
+    >
+      <div ref={pinRef} className="zoom-pin">
+        <canvas ref={canvasRef} className="zoom-canvas" />
+        <div className="zoom-vignette" />
 
-      {!ready && (
-        <div className="zoom-loader">
-          <div className="zoom-loader-bar">
-            <div className="zoom-loader-fill" style={{ width: `${loadPercent}%` }} />
+        {!ready && (
+          <div className="zoom-loader">
+            <div className="zoom-loader-bar">
+              <div className="zoom-loader-fill" style={{ width: `${loadPercent}%` }} />
+            </div>
+            <span>{loadPercent}%</span>
           </div>
-          <span>{loadPercent}%</span>
+        )}
+
+        <div className="zoom-copy">
+          {STAGES.map((stage, i) => (
+            <div
+              className="zoom-stage"
+              key={stage.title}
+              ref={(el) => {
+                stageRefs.current[i] = el
+              }}
+            >
+              <span className="zoom-eyebrow">{stage.eyebrow}</span>
+              <h2>{stage.title}</h2>
+              <p>{stage.text}</p>
+            </div>
+          ))}
         </div>
-      )}
 
-      <div className="zoom-copy">
-        {STAGES.map((stage, i) => (
-          <div
-            className="zoom-stage"
-            key={stage.title}
-            ref={(el) => {
-              stageRefs.current[i] = el
-            }}
-          >
-            <span className="zoom-eyebrow">{stage.eyebrow}</span>
-            <h2>{stage.title}</h2>
-            <p>{stage.text}</p>
-          </div>
-        ))}
-      </div>
-
-      <div className="zoom-progress-track">
-        <div className="zoom-progress-fill" ref={progressFillRef} />
+        <div className="zoom-progress-track">
+          <div className="zoom-progress-fill" ref={progressFillRef} />
+        </div>
       </div>
     </section>
   )
