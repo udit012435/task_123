@@ -89,7 +89,7 @@
   gap: 12px;
 }
 
-.footer-social a {
+.footer-col ul.footer-social a {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -99,12 +99,13 @@
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
   font-size: 15px;
-  transition: background 0.25s ease, transform 0.25s ease;
+  transition: background 0.25s ease;
 }
 
-.footer-social a:hover {
+.footer-col ul.footer-social a:hover {
   background: var(--primary);
-  transform: translateY(-3px);
+  color: #fff;
+  padding-left: 0;
 }
 
 .footer-bottom {
