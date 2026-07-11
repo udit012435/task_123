@@ -14,7 +14,8 @@
 
 .package-card:hover {
   transform: translateY(-8px);
-  box-shadow: var(--shadow);
+  box-shadow: 0 16px 40px -12px rgba(255, 122, 69, 0.55);
+  border-color: var(--primary);
 }
 
 .package-image {
